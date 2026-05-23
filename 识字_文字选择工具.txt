@@ -150,6 +150,13 @@
     var FINGER_PREVIEW_CONTENT_INTERVAL = 24;
     var FINGER_PREVIEW_TEXT_REBIND_INTERVAL = 200;
     var FINGER_PREVIEW_MOVE_THRESHOLD_PX = 1;
+    var INITIAL_TEXT_FAST_LIMIT = 1500;       // 首屏快速加载上限，长文本先显示前段
+    var INITIAL_TEXT_DELAY_MS = 60;           // 主 UI 先显示，再填入文本
+    var FULL_TEXT_DELAY_MS = 1200;            // 长文本后台补全延迟，避开首屏动画和放大镜预热
+    var pendingFullTextRunnable = null;
+    var pendingFingerPreviewWarmupRunnable = null;
+    var isPartialTextLoaded = false;
+    var originalFullText = "";
     
     // 翻译 API 统一鉴权配置读取
     var API_APP_ID = typeof localVarOf$应用ID !== 'undefined' ? localVarOf$应用ID : "";
@@ -545,7 +552,7 @@
         show: function(text) {
             if (mainLayout !== null) {
                 isShowing = true;
-                fullText = (typeof text === 'string') ? text : String(text || "");
+                this.resetTextLoadState((typeof text === 'string') ? text : String(text || ""));
                 selectedIndices = [];
                 selectedSet = {};
                 addedSpans = []; 
@@ -576,11 +583,9 @@
                         if (seekBar) seekBar.setProgress(currentFontSize - MIN_FONT_SIZE);
                         if (fontSizeLabel) fontSizeLabel.setText(currentFontSize + "sp");
                         if (textView) textView.setTextSize(currentFontSize);
-                        self.updateTextView();
-                        self.updateActionButtons();
-                        self.adjustScrollViewHeight();
                         mainLayout.setVisibility(View.VISIBLE);
                         animateWindowEnter(mainLayout);
+                        self.scheduleInitialTextLoad();
                     } catch (e) {
                         showToast("显示窗口失败: " + e.message);
                         isShowing = false;
@@ -607,7 +612,7 @@
             }
             
             isShowing = true;
-            fullText = (typeof text === 'string') ? text : String(text || "");
+            this.resetTextLoadState((typeof text === 'string') ? text : String(text || ""));
             selectedIndices = [];
             selectedSet = {};
             addedSpans = []; 
@@ -634,10 +639,7 @@
                 try {
                     self.createWindow();
                     animateWindowEnter(mainLayout);
-                    self.updateTextView();
-                    mainHandler.postDelayed(new java.lang.Runnable({
-                        run: function() { self.adjustScrollViewHeight(); }
-                    }), 100);
+                    self.scheduleInitialTextLoad();
                 } catch (e) {
                     showToast("创建窗口失败: " + e.message);
                     isShowing = false;
@@ -661,6 +663,14 @@
                             mainHandler.removeCallbacks(keepAliveTimer);
                             keepAliveTimer = null;
                         }
+                        if (pendingFullTextRunnable) {
+                            mainHandler.removeCallbacks(pendingFullTextRunnable);
+                            pendingFullTextRunnable = null;
+                        }
+                        if (pendingFingerPreviewWarmupRunnable) {
+                            mainHandler.removeCallbacks(pendingFingerPreviewWarmupRunnable);
+                            pendingFingerPreviewWarmupRunnable = null;
+                        }
 
                         拾字Floaty.removeFingerPreview();
                         
@@ -674,6 +684,103 @@
                     isShowing = false;
                 });
             }
+        },
+
+        resetTextLoadState: function(text) {
+            if (pendingFullTextRunnable) {
+                try { mainHandler.removeCallbacks(pendingFullTextRunnable); } catch (e) {}
+                pendingFullTextRunnable = null;
+            }
+            if (pendingFingerPreviewWarmupRunnable) {
+                try { mainHandler.removeCallbacks(pendingFingerPreviewWarmupRunnable); } catch (e1) {}
+                pendingFingerPreviewWarmupRunnable = null;
+            }
+            originalFullText = String(text || "");
+            isPartialTextLoaded = false;
+            fullText = originalFullText;
+        },
+
+        scheduleFingerPreviewWarmup: function(delayMs) {
+            var self = this;
+            if (pendingFingerPreviewWarmupRunnable) {
+                try { mainHandler.removeCallbacks(pendingFingerPreviewWarmupRunnable); } catch (e0) {}
+                pendingFingerPreviewWarmupRunnable = null;
+            }
+            pendingFingerPreviewWarmupRunnable = new java.lang.Runnable({
+                run: function() {
+                    pendingFingerPreviewWarmupRunnable = null;
+                    try {
+                        if (!isShowing || !mainLayout || !windowManager || fingerPreviewLayout) return;
+                        self.createFingerPreview();
+                    } catch (e1) {}
+                }
+            });
+            mainHandler.postDelayed(pendingFingerPreviewWarmupRunnable, delayMs || 900);
+        },
+
+        scheduleInitialTextLoad: function() {
+            var self = this;
+            if (pendingFullTextRunnable) {
+                try { mainHandler.removeCallbacks(pendingFullTextRunnable); } catch (e0) {}
+                pendingFullTextRunnable = null;
+            }
+            if (textView) {
+                try {
+                    textView.setText("正在加载文本…");
+                    textView.setTextColor(Colors.textSecondary);
+                } catch (e1) {}
+            }
+            mainHandler.postDelayed(new java.lang.Runnable({
+                run: function() {
+                    try {
+                        if (!isShowing || !textView) return;
+                        var source = String(originalFullText || fullText || "");
+                        if (source.length > INITIAL_TEXT_FAST_LIMIT) {
+                            isPartialTextLoaded = true;
+                            fullText = source.substring(0, INITIAL_TEXT_FAST_LIMIT);
+                            self.updateTextView(true);
+                            self.updateActionButtons();
+                            self.adjustScrollViewHeight();
+                            self.scheduleFingerPreviewWarmup(900);
+
+                            pendingFullTextRunnable = new java.lang.Runnable({
+                                run: function() {
+                                    try {
+                                        if (!isShowing || !textView) return;
+                                        if (isDragging || selectedIndices.length > 0) {
+                                            mainHandler.postDelayed(pendingFullTextRunnable, 600);
+                                            return;
+                                        }
+                                        pendingFullTextRunnable = null;
+                                        fullText = source;
+                                        isPartialTextLoaded = false;
+                                        selectedIndices = [];
+                                        selectedSet = {};
+                                        addedSpans = [];
+                                        cachedLayout = null;
+                                        fingerPreviewMirrorReady = false;
+                                        fingerPreviewMirrorContentDirty = true;
+                                        self.updateTextView(true);
+                                        self.updateActionButtons();
+                                        self.adjustScrollViewHeight();
+                                        showToast("长文本已加载完整");
+                                    } catch (e2) {}
+                                }
+                            });
+                            mainHandler.postDelayed(pendingFullTextRunnable, FULL_TEXT_DELAY_MS);
+                        } else {
+                            isPartialTextLoaded = false;
+                            fullText = source;
+                            self.updateTextView(true);
+                            self.updateActionButtons();
+                            self.adjustScrollViewHeight();
+                            self.scheduleFingerPreviewWarmup(700);
+                        }
+                    } catch (e3) {
+                        showToast("加载文本失败: " + e3.message);
+                    }
+                }
+            }), INITIAL_TEXT_DELAY_MS);
         },
         
         createWindow: function() {
@@ -743,7 +850,6 @@
             this.updateActionButtons();
             
             windowManager.addView(mainLayout, layoutParams);
-            this.createFingerPreview();
         },
         
         createTitleBar: function() {
@@ -1526,7 +1632,7 @@
             } catch (e) {}
         },
         
-        updateTextView: function() {
+        updateTextView: function(skipAdjust) {
             addedSpans = [];
             fingerPreviewMirrorReady = false;
             fingerPreviewMirrorContentDirty = true;
@@ -1534,9 +1640,10 @@
             fingerPreviewMirrorSpans = [];
             spannable = new SpannableStringBuilder(fullText);
             // 必须指定 BufferType.SPANNABLE，才能让后续用 liveText 直接修改颜色生效
+            textView.setTextColor(Colors.text);
             textView.setText(spannable, android.widget.TextView.BufferType.SPANNABLE); 
             this.updatePreview(); 
-            this.adjustScrollViewHeight();
+            if (!skipAdjust) this.adjustScrollViewHeight();
         },
 
         getSelectedText: function() {
@@ -1591,7 +1698,10 @@
             var count = selectedIndices.length;
             if (countLabelView) countLabelView.setText("已选 " + count + " 字");
             this.updateActionButtons();
-            if (count === 0) { previewTextView.setText("点击选择文字..."); previewTextView.setTextColor(Colors.textSecondary); return;
+            if (count === 0) {
+                if (isPartialTextLoaded) previewTextView.setText("长文本加载中，先显示前" + fullText.length + "字...");
+                else previewTextView.setText("点击选择文字...");
+                previewTextView.setTextColor(Colors.textSecondary); return;
             }
             
             var chars = [];
