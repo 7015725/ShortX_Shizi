@@ -1689,11 +1689,42 @@
             if (!skipAdjust) this.adjustScrollViewHeight();
         },
 
-        getSelectedText: function() {
-            if (selectedIndices.length === 0) return "";
-            var chars = []; for (var i = 0; i < selectedIndices.length; i++) { chars.push(fullText.charAt(selectedIndices[i]));
+        collectSelectedRanges: function() {
+            if (selectedIndices.length === 0) return [];
+            var sorted = selectedIndices.slice(0).sort(function(a, b) { return a - b; });
+            var ranges = [];
+            var start = sorted[0];
+            var end = sorted[0] + 1;
+            for (var i = 1; i < sorted.length; i++) {
+                var idx = sorted[i];
+                if (idx === end) {
+                    end = idx + 1;
+                } else {
+                    ranges.push({ start: start, end: end, text: fullText.substring(start, end) });
+                    start = idx;
+                    end = idx + 1;
+                }
             }
-            return chars.join('');
+            ranges.push({ start: start, end: end, text: fullText.substring(start, end) });
+            return ranges;
+        },
+
+        getSelectedText: function() {
+            var ranges = this.collectSelectedRanges();
+            if (ranges.length === 0) return "";
+            var parts = [];
+            for (var i = 0; i < ranges.length; i++) {
+                parts.push(ranges[i].text);
+            }
+            return parts.join("\n");
+        },
+
+        cloneSelectedSet: function(srcSet) {
+            var copy = {};
+            for (var k in srcSet) {
+                if (srcSet.hasOwnProperty(k) && srcSet[k]) copy[k] = true;
+            }
+            return copy;
         },
 
         setActionEnabled: function(view, enabled) {
@@ -1709,32 +1740,105 @@
             this.setActionEnabled(selectAllActionBtn, fullText && fullText.length > 0); this.setActionEnabled(clearActionBtn, hasSelection);
         },
 
-        replaceSelectedText: function(newText) {
-            if (selectedIndices.length === 0) return false;
-            var replacement = String(newText == null ? "" : newText); var oldText = fullText; var oldSelected = selectedIndices.slice(0);
-            var removeMap = rebuildSelectedSetFromIndices(oldSelected); var firstIndex = oldSelected[0]; var parts = []; var inserted = false;
-            for (var i = 0; i < oldText.length; i++) {
-                if (removeMap[i]) { if (!inserted) { parts.push(replacement);
-                inserted = true; } } else { parts.push(oldText.charAt(i)); }
+        applyReplacementsToText: function(sourceText, replacements) {
+            var result = String(sourceText == null ? "" : sourceText);
+            for (var i = replacements.length - 1; i >= 0; i--) {
+                var item = replacements[i];
+                var start = item.start;
+                var end = item.end;
+                if (start < 0) start = 0;
+                if (end < start) end = start;
+                if (start > result.length) start = result.length;
+                if (end > result.length) end = result.length;
+                result = result.substring(0, start) + String(item.translatedText == null ? "" : item.translatedText) + result.substring(end);
             }
-            if (!inserted) parts.push(replacement);
-            lastTranslationState = { fullText: oldText, selectedIndices: oldSelected };
-            fullText = parts.join(''); selectedIndices = []; selectedSet = {};
-            for (var j = 0; j < replacement.length; j++) { selectedIndices.push(firstIndex + j); selectedSet[firstIndex + j] = true;
+            return result;
+        },
+
+        replaceSelectedRanges: function(replacements) {
+            if (!replacements || replacements.length === 0) return false;
+            var oldFullText = fullText;
+            var oldOriginalFullText = originalFullText;
+            var oldSelectedIndices = selectedIndices.slice(0);
+            var oldSelectedSet = this.cloneSelectedSet(selectedSet);
+            var oldScrollY = 0;
+            try { if (scrollView) oldScrollY = scrollView.getScrollY(); } catch (e0) { oldScrollY = 0; }
+            var oldIsPartialTextLoaded = isPartialTextLoaded;
+
+            lastTranslationState = {
+                fullText: oldFullText,
+                originalFullText: oldOriginalFullText,
+                selectedIndices: oldSelectedIndices,
+                selectedSet: oldSelectedSet,
+                scrollY: oldScrollY,
+                isPartialTextLoaded: oldIsPartialTextLoaded
+            };
+
+            fullText = this.applyReplacementsToText(oldFullText, replacements);
+            originalFullText = this.applyReplacementsToText(oldOriginalFullText || oldFullText, replacements);
+            selectedIndices = [];
+            selectedSet = {};
+
+            var shift = 0;
+            for (var i = 0; i < replacements.length; i++) {
+                var item = replacements[i];
+                var newStart = item.start + shift;
+                var replacement = String(item.translatedText == null ? "" : item.translatedText);
+                for (var j = 0; j < replacement.length; j++) {
+                    selectedIndices.push(newStart + j);
+                    selectedSet[newStart + j] = true;
+                }
+                shift += replacement.length - (item.end - item.start);
             }
+            selectedIndices.sort(function(a, b) { return a - b; });
 
             var self = this;
-            runUi(function() { try { self.updateTextView(); self.updateSelectionSpans(); self.adjustScrollViewHeight(); self.updateActionButtons(); } catch (e) { showToast("替换失败"); } });
+            runUi(function() {
+                try {
+                    self.updateTextView();
+                    self.updateSelectionSpans();
+                    self.adjustScrollViewHeight();
+                    self.updateActionButtons();
+                } catch (e) {
+                    showToast("替换失败");
+                }
+            });
             return true;
+        },
+
+        replaceSelectedText: function(newText) {
+            var ranges = this.collectSelectedRanges();
+            if (ranges.length === 0) return false;
+            var replacements = [];
+            for (var i = 0; i < ranges.length; i++) {
+                replacements.push({ start: ranges[i].start, end: ranges[i].end, translatedText: String(newText == null ? "" : newText) });
+            }
+            return this.replaceSelectedRanges(replacements);
         },
 
         undoLastTranslation: function() {
             if (!lastTranslationState) { showToast("没有可撤销内容");
             return; }
-            fullText = lastTranslationState.fullText; selectedIndices = lastTranslationState.selectedIndices.slice(0);
-            selectedSet = rebuildSelectedSetFromIndices(selectedIndices); lastTranslationState = null;
+            fullText = lastTranslationState.fullText;
+            originalFullText = lastTranslationState.originalFullText;
+            isPartialTextLoaded = !!lastTranslationState.isPartialTextLoaded;
+            selectedIndices = lastTranslationState.selectedIndices.slice(0);
+            selectedSet = this.cloneSelectedSet(lastTranslationState.selectedSet || rebuildSelectedSetFromIndices(selectedIndices));
+            var restoreScrollY = lastTranslationState.scrollY || 0;
+            lastTranslationState = null;
             var self = this;
-            runUi(function() { try { self.updateTextView(); self.updateSelectionSpans(); self.adjustScrollViewHeight(); self.updateActionButtons(); showToast("已撤销"); } catch (e) {} });
+            runUi(function() {
+                try {
+                    self.updateTextView();
+                    self.updateSelectionSpans();
+                    self.adjustScrollViewHeight();
+                    if (scrollView) {
+                        scrollView.post(new java.lang.Runnable({ run: function() { try { scrollView.scrollTo(0, restoreScrollY); } catch (e1) {} } }));
+                    }
+                    self.updateActionButtons();
+                    showToast("已撤销");
+                } catch (e) {}
+            });
         },
         
         updatePreview: function() {
@@ -1747,10 +1851,12 @@
                 previewTextView.setTextColor(Colors.textSecondary); return;
             }
             
-            var chars = [];
-            for (var i = 0; i < selectedIndices.length; i++) { chars.push(fullText.charAt(selectedIndices[i]));
+            var ranges = this.collectSelectedRanges();
+            var parts = [];
+            for (var i = 0; i < ranges.length; i++) {
+                parts.push(ranges[i].text);
             }
-            previewTextView.setText(chars.join('')); previewTextView.setTextColor(Colors.text);
+            previewTextView.setText(parts.join("\n")); previewTextView.setTextColor(Colors.text);
         },
         
         selectAll: function() {
@@ -1774,6 +1880,67 @@
             }
             return false;
         },
+
+        translateTextSync: function(text) {
+            var apiType = DIY_CONFIG.TRANSLATE_API;
+            var isCh = this.isChinese(text);
+            var source = "auto";
+            var target = "";
+            var params = null;
+            var reqUrl = "";
+            if (apiType === 2) {
+                target = isCh ? "en" : "zh-CHS";
+                params = buildYoudaoParams(text, source, target);
+                reqUrl = YD_API_URL;
+            } else {
+                target = isCh ? "en" : "zh";
+                params = buildBaiduParams(text, source, target);
+                reqUrl = BD_API_URL;
+            }
+
+            var formBody = urlEncodeForm(params);
+            var url = new java.net.URL(reqUrl);
+            var conn = url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(30000);
+
+            var os = conn.getOutputStream();
+            os.write(new java.lang.String(formBody).getBytes("UTF-8"));
+            os.flush();
+            os.close();
+
+            var responseCode = conn.getResponseCode();
+            var inputStream = responseCode === 200 ? conn.getInputStream() : conn.getErrorStream();
+            var reader = new java.io.BufferedReader(new java.io.InputStreamReader(inputStream, "UTF-8"));
+            var line;
+            var response = "";
+            while ((line = reader.readLine()) != null) {
+                response += line;
+            }
+            reader.close();
+            if (responseCode !== 200) throw "HTTP " + responseCode;
+
+            var json = JSON.parse(response);
+            var translatedText = "";
+            if (apiType === 2) {
+                if (json.errorCode && json.errorCode !== "0") throw "错误码 " + json.errorCode;
+                if (json.translation && json.translation.length > 0) translatedText = json.translation[0];
+            } else {
+                if (json.error_code !== undefined && json.error_code != 0) throw "错误码 " + json.error_code;
+                if (json.trans_result && json.trans_result.length > 0) {
+                    var parts = [];
+                    for (var ti = 0; ti < json.trans_result.length; ti++) {
+                        parts.push(json.trans_result[ti].dst);
+                    }
+                    translatedText = parts.join("\n");
+                }
+            }
+            if (!translatedText) throw "无效响应";
+            return translatedText;
+        },
         
         doTranslate: function() {
             try {
@@ -1781,93 +1948,35 @@
                 return; }
                 if (!API_APP_ID || !API_APP_SECRET) { showToast("请先配置翻译接口的 APPID 和 秘钥");
                 return; }
-                var text = this.getSelectedText();
-                if (text.length > 5000) { showToast("文本过长，最多支持5000字符"); return; }
+                var ranges = this.collectSelectedRanges();
+                if (ranges.length === 0) { showToast("请先选择文字"); return; }
+                for (var ri = 0; ri < ranges.length; ri++) {
+                    if (ranges[ri].text.length > 5000) { showToast("单段文本过长，最多支持5000字符"); return; }
+                }
                 
                 if (isTranslating) { showToast("正在翻译中，请稍候...");
                 return; }
                 
                 isTranslating = true;
-                showToast("正在翻译...");
+                showToast(ranges.length > 1 ? ("正在分段翻译 " + ranges.length + " 段...") : "正在翻译...");
                 var self = this;
                 
                 new java.lang.Thread(new java.lang.Runnable({
                     run: function() {
                         try {
-                          
-                            var apiType = DIY_CONFIG.TRANSLATE_API;
-                            var isCh = self.isChinese(text);
-                            var source = "auto";
-                            var target = "";
-  
-                            var params = null;
-                            var reqUrl = "";
-                            
-                            if (apiType === 2) {
-                                target = isCh ? "en" : "zh-CHS";
-                                params = buildYoudaoParams(text, source, target);
-                                reqUrl = YD_API_URL;
-                            } else {
-                                target = isCh ? "en" : "zh";
-                                params = buildBaiduParams(text, source, target);
-                                reqUrl = BD_API_URL;
+                            var replacements = [];
+                            for (var i = 0; i < ranges.length; i++) {
+                                var translatedText = self.translateTextSync(ranges[i].text);
+                                replacements.push({
+                                    start: ranges[i].start,
+                                    end: ranges[i].end,
+                                    translatedText: translatedText
+                                });
                             }
-                            
-                            var formBody = urlEncodeForm(params);
-                            var url = new java.net.URL(reqUrl); 
-                            var conn = url.openConnection();
-                            
-                            conn.setRequestMethod("POST"); 
-                            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded"); 
-                            conn.setDoOutput(true); 
-                            conn.setConnectTimeout(10000); 
-                            conn.setReadTimeout(30000);
-                            
-                            var os = conn.getOutputStream();
-                            os.write(new java.lang.String(formBody).getBytes("UTF-8")); 
-                            os.flush(); 
-                            os.close();
-                            
-                            var responseCode = conn.getResponseCode(); 
-                            var inputStream = responseCode === 200 ? conn.getInputStream() : conn.getErrorStream();
-                            var reader = new java.io.BufferedReader(new java.io.InputStreamReader(inputStream, "UTF-8"));
-                            var line; var response = "";
-                            while ((line = reader.readLine()) != null) { response += line;
-                            } 
-                            reader.close();
-                            if (responseCode !== 200) { showToast("翻译失败: HTTP " + responseCode); return;
-                            }
-                            
-                            var json = JSON.parse(response);
-                            var translatedText = "";
-                            
-                            if (apiType === 2) {
-                                if (json.errorCode && json.errorCode !== "0") { showToast("翻译失败: 错误码 " + json.errorCode); return;
-                                }
-                                if (json.translation && json.translation.length > 0) {
-                                    translatedText = json.translation[0];
-                                }
-                            } else {
-                                if (json.error_code !== undefined && 
-                                    json.error_code != 0) { showToast("翻译失败: 错误码 " + json.error_code); return;
-                                }
-                                if (json.trans_result && json.trans_result.length > 0) {
-                                    var parts = [];
-                                    for (var ti = 0; ti < json.trans_result.length; ti++) { parts.push(json.trans_result[ti].dst);
-                                    }
-                                    translatedText = parts.join("\n");
-                                }
-                            }
-                            
-                            if (translatedText) { 
-             
-                                self.replaceSelectedText(translatedText);
-                                showToast("翻译并替换完成"); 
-                            } else { 
-                                showToast("翻译失败: 无效响应");
-                            }
+                            self.replaceSelectedRanges(replacements);
+                            showToast(ranges.length > 1 ? ("翻译并替换完成，共" + ranges.length + "段") : "翻译并替换完成");
                         } catch (e) { 
-                            showToast("翻译出错: " + e.message);
+                            showToast("翻译出错: " + (e.message || e));
                         } finally {
                             isTranslating = false;
                         }
@@ -1882,10 +1991,7 @@
         doCopy: function() {
             if (selectedIndices.length === 0) { showToast("请先选择文字");
             return; }
-            var chars = [];
-            for (var i = 0; i < selectedIndices.length; i++) { chars.push(fullText.charAt(selectedIndices[i]));
-            }
-            var text = chars.join(''); setClipboard(text); showToast("已复制"); this.hide();
+            var text = this.getSelectedText(); setClipboard(text); showToast("已复制"); this.hide();
         }
     };
 
