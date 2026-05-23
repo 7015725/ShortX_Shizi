@@ -1881,6 +1881,19 @@
             return false;
         },
 
+        createTranslateError: function(code, message) {
+            var err = { code: String(code || ""), message: String(message || "") };
+            err.toString = function() { return err.message || ("错误码 " + err.code); };
+            return err;
+        },
+
+        getTranslateErrorMessage: function(e) {
+            var code = e && e.code ? String(e.code) : "";
+            if (code === "54003") return "翻译接口访问过快，请稍后再试";
+            if (e && e.message) return String(e.message);
+            return String(e);
+        },
+
         translateTextSync: function(text) {
             var apiType = DIY_CONFIG.TRANSLATE_API;
             var isCh = this.isChinese(text);
@@ -1921,15 +1934,15 @@
                 response += line;
             }
             reader.close();
-            if (responseCode !== 200) throw "HTTP " + responseCode;
+            if (responseCode !== 200) throw this.createTranslateError("HTTP", "HTTP " + responseCode);
 
             var json = JSON.parse(response);
             var translatedText = "";
             if (apiType === 2) {
-                if (json.errorCode && json.errorCode !== "0") throw "错误码 " + json.errorCode;
+                if (json.errorCode && json.errorCode !== "0") throw this.createTranslateError(json.errorCode, "错误码 " + json.errorCode);
                 if (json.translation && json.translation.length > 0) translatedText = json.translation[0];
             } else {
-                if (json.error_code !== undefined && json.error_code != 0) throw "错误码 " + json.error_code;
+                if (json.error_code !== undefined && json.error_code != 0) throw this.createTranslateError(json.error_code, "错误码 " + json.error_code);
                 if (json.trans_result && json.trans_result.length > 0) {
                     var parts = [];
                     for (var ti = 0; ti < json.trans_result.length; ti++) {
@@ -1938,8 +1951,24 @@
                     translatedText = parts.join("\n");
                 }
             }
-            if (!translatedText) throw "无效响应";
+            if (!translatedText) throw this.createTranslateError("EMPTY", "无效响应");
             return translatedText;
+        },
+
+        translateTextSyncWithRetry: function(text) {
+            var retryDelays = [1200, 2500, 5000];
+            var lastError = null;
+            for (var attempt = 0; attempt <= retryDelays.length; attempt++) {
+                try {
+                    return this.translateTextSync(text);
+                } catch (e) {
+                    lastError = e;
+                    var code = e && e.code ? String(e.code) : "";
+                    if (code !== "54003" || attempt >= retryDelays.length) throw e;
+                    java.lang.Thread.sleep(retryDelays[attempt]);
+                }
+            }
+            throw lastError;
         },
         
         doTranslate: function() {
@@ -1966,7 +1995,8 @@
                         try {
                             var replacements = [];
                             for (var i = 0; i < ranges.length; i++) {
-                                var translatedText = self.translateTextSync(ranges[i].text);
+                                if (i > 0) java.lang.Thread.sleep(1200);
+                                var translatedText = self.translateTextSyncWithRetry(ranges[i].text);
                                 replacements.push({
                                     start: ranges[i].start,
                                     end: ranges[i].end,
@@ -1976,7 +2006,7 @@
                             self.replaceSelectedRanges(replacements);
                             showToast(ranges.length > 1 ? ("翻译并替换完成，共" + ranges.length + "段") : "翻译并替换完成");
                         } catch (e) { 
-                            showToast("翻译出错: " + (e.message || e));
+                            showToast(self.getTranslateErrorMessage(e));
                         } finally {
                             isTranslating = false;
                         }
