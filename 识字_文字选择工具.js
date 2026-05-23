@@ -90,6 +90,7 @@
     var fontSizeLabel = null;
     var scrollView = null;
     var countLabelView = null;
+    var loadFullTextBtn = null;
     var copyActionBtn = null;
     var translateActionBtn = null;
     var selectAllActionBtn = null;
@@ -704,6 +705,7 @@
                         textView = null;
                         scrollView = null;
                         previewTextView = null;
+                        loadFullTextBtn = null;
                         
                     } catch (e) {}
                     isShowing = false;
@@ -743,6 +745,36 @@
             mainHandler.postDelayed(pendingFingerPreviewWarmupRunnable, delayMs || 900);
         },
 
+        loadFullTextNow: function(showMsg) {
+            try {
+                if (!isShowing || !textView || !isPartialTextLoaded) return false;
+                if (isDragging || selectedIndices.length > 0) {
+                    if (showMsg) showToast("请先松手或清空选择后再加载全文");
+                    return false;
+                }
+                if (pendingFullTextRunnable) {
+                    try { mainHandler.removeCallbacks(pendingFullTextRunnable); } catch (e0) {}
+                    pendingFullTextRunnable = null;
+                }
+                fullText = String(originalFullText || fullText || "");
+                isPartialTextLoaded = false;
+                selectedIndices = [];
+                selectedSet = {};
+                addedSpans = [];
+                cachedLayout = null;
+                fingerPreviewMirrorReady = false;
+                fingerPreviewMirrorContentDirty = true;
+                this.updateTextView(true);
+                this.updateActionButtons();
+                this.adjustScrollViewHeight();
+                if (showMsg) showToast("长文本已加载完整");
+                return true;
+            } catch (e1) {
+                if (showMsg) showToast("加载全文失败: " + e1.message);
+                return false;
+            }
+        },
+
         scheduleInitialTextLoad: function() {
             var self = this;
             if (pendingFullTextRunnable) {
@@ -776,19 +808,7 @@
                                             mainHandler.postDelayed(pendingFullTextRunnable, 600);
                                             return;
                                         }
-                                        pendingFullTextRunnable = null;
-                                        fullText = source;
-                                        isPartialTextLoaded = false;
-                                        selectedIndices = [];
-                                        selectedSet = {};
-                                        addedSpans = [];
-                                        cachedLayout = null;
-                                        fingerPreviewMirrorReady = false;
-                                        fingerPreviewMirrorContentDirty = true;
-                                        self.updateTextView(true);
-                                        self.updateActionButtons();
-                                        self.adjustScrollViewHeight();
-                                        showToast("长文本已加载完整");
+                                        self.loadFullTextNow(false);
                                     } catch (e2) {}
                                 }
                             });
@@ -1020,10 +1040,18 @@
             previewBox.setPadding(uiDp(12, 14), uiDp(10, 12), uiDp(12, 14), uiDp(10, 12));
             var params = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT); params.setMargins(0, uiDp(12, 14), 0, 0); previewBox.setLayoutParams(params);
             
-            var header = new LinearLayout(appContext); header.setOrientation(LinearLayout.HORIZONTAL);
+            var header = new LinearLayout(appContext); header.setOrientation(LinearLayout.HORIZONTAL); header.setGravity(Gravity.CENTER_VERTICAL);
             countLabelView = new TextView(appContext); countLabelView.setText("已选 0 字"); countLabelView.setTextColor(Colors.primary); countLabelView.setTextSize(uiTextSize(11, 12));
             countLabelView.setLayoutParams(new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1));
-            header.addView(countLabelView); previewBox.addView(header);
+            header.addView(countLabelView);
+            var self = this;
+            loadFullTextBtn = new Button(appContext);
+            loadFullTextBtn.setText("加载全文"); loadFullTextBtn.setTextColor(Colors.primary); loadFullTextBtn.setTextSize(uiTextSize(10, 11)); loadFullTextBtn.setAllCaps(false);
+            loadFullTextBtn.setBackground(createPressableDrawable(Colors.btnSecondaryBg, Colors.btnSecondaryPressed, isTablet ? 10 : 8));
+            var loadParams = new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, uiDp(30, 34)); loadParams.setMargins(uiDp(8, 10), 0, 0, 0); loadFullTextBtn.setLayoutParams(loadParams);
+            loadFullTextBtn.setVisibility(View.GONE);
+            loadFullTextBtn.setOnClickListener(new View.OnClickListener({ onClick: function(v) { hapticFeedback(v); self.loadFullTextNow(true); } }));
+            header.addView(loadFullTextBtn); previewBox.addView(header);
             var previewScroll = new ScrollView(appContext); previewScroll.setLayoutParams(new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, uiDp(60, 80)));
             previewTextView = new TextView(appContext); previewTextView.setText("点击选择文字..."); previewTextView.setTextColor(Colors.textSecondary); previewTextView.setTextSize(uiTextSize(14, 16)); previewTextView.setLineSpacing(uiDp(2, 4), 1);
             previewScroll.addView(previewTextView); previewBox.addView(previewScroll);
@@ -1723,8 +1751,9 @@
             var count = selectedIndices.length;
             if (countLabelView) countLabelView.setText("已选 " + count + " 字");
             this.updateActionButtons();
+            if (loadFullTextBtn) loadFullTextBtn.setVisibility(isPartialTextLoaded ? View.VISIBLE : View.GONE);
             if (count === 0) {
-                if (isPartialTextLoaded) previewTextView.setText("长文本加载中，先显示前" + fullText.length + "字...");
+                if (isPartialTextLoaded) previewTextView.setText("已快速显示前" + fullText.length + "字，可点右上角加载全文；空闲时也会自动补全。");
                 else previewTextView.setText("点击选择文字...");
                 previewTextView.setTextColor(Colors.textSecondary); return;
             }
