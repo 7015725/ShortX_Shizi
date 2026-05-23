@@ -12,20 +12,27 @@
     // 拾字 - DIY 自定义配置区
     // ==========================================
     var DIY_CONFIG = {
-        // 翻译引擎选择: 1 = 百度翻译, 2 = 有道翻译
+        // 翻译引擎选择：1 = 百度翻译，2 = 有道翻译。
+        // 也可在 ShortX 局部变量「翻译引擎」里填 1 或 2 覆盖这里。
         TRANSLATE_API: typeof localVarOf$翻译引擎 !== 'undefined' ? localVarOf$翻译引擎 : 1,            
         
-        MAX_CHAR_LIMIT: 8000,        // 最大允许加载的字符数（默认 8000，原版为 1000）
-        TEXT_AREA_HEIGHT_DP: 420,    // 文本展示区的最大可视高度(dp)，数值越大，单屏显示的行数越多
+        // 最大允许载入的字符数。数值越大可处理长文越多，但首次排版、选区刷新、放大镜镜像都会更吃性能。
+        // 建议：普通手机 3000~5000；性能较好可 8000；如果首屏仍慢，可先降到 3000 验证。
+        MAX_CHAR_LIMIT: 8000,
+
+        // 主文本区最大高度(dp)。数值越大，单屏显示行数越多，但窗口更高、布局测量更重。
+        // 建议：手机 360~420；平板 480~560；如果遮挡严重可调小。
+        TEXT_AREA_HEIGHT_DP: 420,
         
-        // 边缘下拉/上推滚动时的界面刷新延迟 (毫秒)。
-        // 数值越小滚动越平滑，但也相对更吃手机性能。
+        // 边缘下拉/上推滚动时的自动滚动刷新延迟(ms)。
+        // 数值越小滚动越丝滑，但 MOVE/选区/放大镜刷新更频繁，更吃 CPU。
+        // 建议：60Hz 用 16~24；90Hz 用 11~16；120Hz 用 8~12；卡顿时优先调大到 16 或 24。
         // 常见屏幕刷新率 (FPS) 的换算参考值：
         // 30 帧/秒  ≈ 33
-        // 60 帧/秒  ≈ 16 (大多数普通手机的默认状态)
+        // 60 帧/秒  ≈ 16
         // 90 帧/秒  ≈ 11
-        // 120 帧/秒 ≈ 8  (高刷屏手机推荐)
-        // 144 帧/秒 ≈ 7  (电竞手机推荐)
+        // 120 帧/秒 ≈ 8
+        // 144 帧/秒 ≈ 7
         SCROLL_DELAY_MS: 10           
     };
 
@@ -69,9 +76,10 @@
 
     var PREFS_NAME = "拾字Prefs";
     var KEY_FONT_SIZE = "fontSize";
+    // 字号范围：设置面板里的滑块上下限。调太小不易点选，调太大容易增加排版高度。
     var MIN_FONT_SIZE = 12;
     var MAX_FONT_SIZE = 32;
-    var DEFAULT_FONT_SIZE = 20;
+    var DEFAULT_FONT_SIZE = 20;      // 默认字号；首次使用或读取失败时采用此值，后续会记住用户滑块选择。
     var currentFontSize = DEFAULT_FONT_SIZE;
     var windowManager = null;
     var mainLayout = null;
@@ -114,6 +122,7 @@
     var pendingAdjustRunnable = null;
     
     var lastDragUpdateTime = 0;
+    // 拖选刷新节流(ms)：数值越小选区跟手越及时，但高频 setSpan 更吃性能；卡顿时可调到 32~40。
     var DRAG_UPDATE_INTERVAL = 24;
     var pendingDragUpdate = null; 
     var lastDragEnd = -1;
@@ -124,8 +133,11 @@
     var lastTouchRawX = 0;
     var lastTouchRawY = 0;
     var isAutoScrolling = false;
+    // 边缘自动滚动触发区比例：0.15 表示顶部/底部 15% 区域触发自动滚动。
+    // 调大更容易触发滚动；调小可减少误触。
     var SCROLL_EDGE_TOP = 0.15; 
     var SCROLL_EDGE_BOTTOM = 0.15;
+    // 自动滚动速度范围(dp/帧近似值)：数值越大，拖到边缘时滚动越快。
     var SCROLL_MIN_SPEED = 5; 
     var SCROLL_MAX_SPEED = 25;
 
@@ -143,16 +155,29 @@
     var fingerPreviewMirrorLastBindTime = 0;
     var fingerPreviewMirrorSpans = [];
     var fingerPreviewCreateErrorShown = false;
+
+    // 放大镜大小(dp)：越大越容易看清，但全屏 overlay 与镜像 TextView 绘制成本更高。
     var FINGER_PREVIEW_SIZE_DP = 108;
+    // 放大镜相对手指的上移距离(dp)：越大越靠上，避免被手指挡住；太大可能贴近屏幕顶部。
     var FINGER_PREVIEW_OFFSET_Y_DP = 185;
+    // 放大倍数：越大文字越清楚，但镜像内容尺寸越大、首次同步越重。
     var FINGER_PREVIEW_ZOOM = 1.35;
+    // 放大镜位置刷新间隔(ms)：16 约等于 60fps；卡顿时可调 24~33。
     var FINGER_PREVIEW_INTERVAL = 16;
+    // 放大镜内容/选中态刷新间隔(ms)：越小同步越及时，越大越省性能。
     var FINGER_PREVIEW_CONTENT_INTERVAL = 24;
+    // 放大镜镜像全文重绑间隔(ms)：防止频繁 setText；一般不建议低于 100。
     var FINGER_PREVIEW_TEXT_REBIND_INTERVAL = 200;
+    // 放大镜移动阈值(px)：手指移动超过该值才更新圆形位置；调大可减少轻微抖动和刷新次数。
     var FINGER_PREVIEW_MOVE_THRESHOLD_PX = 1;
-    var INITIAL_TEXT_FAST_LIMIT = 1500;       // 首屏快速加载上限，长文本先显示前段
-    var INITIAL_TEXT_DELAY_MS = 60;           // 主 UI 先显示，再填入文本
-    var FULL_TEXT_DELAY_MS = 1200;            // 长文本后台补全延迟，避开首屏动画和放大镜预热
+
+    // 长文本首屏加载策略：先显示前 N 字，让窗口先出来，再延迟补全全文。
+    // 调大可减少“二次补全文”感，但首屏更慢；调小首屏更快，但长文会更明显地分段加载。
+    var INITIAL_TEXT_FAST_LIMIT = 1500;
+    // 主 UI 创建后延迟多少 ms 再填入文本。给窗口 addView/入场动画让路，避免首屏阻塞。
+    var INITIAL_TEXT_DELAY_MS = 60;
+    // 完整长文本补全延迟(ms)。建议晚于首屏动画和放大镜预热；太小会重新卡首屏，太大用户等待更久。
+    var FULL_TEXT_DELAY_MS = 1200;
     var pendingFullTextRunnable = null;
     var pendingFingerPreviewWarmupRunnable = null;
     var isPartialTextLoaded = false;
