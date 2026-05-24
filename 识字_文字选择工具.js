@@ -1719,6 +1719,57 @@
             return parts.join("\n");
         },
 
+        splitRangeTextForTranslate: function(text) {
+            var raw = String(text == null ? "" : text);
+            var prefix = "";
+            var suffix = "";
+            while (raw.length > 0) {
+                var first = raw.charAt(0);
+                if (first === "\r" || first === "\n") {
+                    prefix += first;
+                    raw = raw.substring(1);
+                } else {
+                    break;
+                }
+            }
+            while (raw.length > 0) {
+                var last = raw.charAt(raw.length - 1);
+                if (last === "\r" || last === "\n") {
+                    suffix = last + suffix;
+                    raw = raw.substring(0, raw.length - 1);
+                } else {
+                    break;
+                }
+            }
+            return { prefix: prefix, core: raw, suffix: suffix };
+        },
+
+        buildTranslatedRangeText: function(parts, translatedText) {
+            var core = String(translatedText == null ? "" : translatedText);
+            return String(parts.prefix || "") + core + String(parts.suffix || "");
+        },
+
+        getLineBreakAfterRange: function(range) {
+            if (!range || range.end >= fullText.length) return "";
+            var first = fullText.charAt(range.end);
+            if (first === "\r") {
+                if (range.end + 1 < fullText.length && fullText.charAt(range.end + 1) === "\n") return "\r\n";
+                return "\r";
+            }
+            if (first === "\n") return "\n";
+            return "";
+        },
+
+        prepareRangeForTranslate: function(range) {
+            var parts = this.splitRangeTextForTranslate(range.text);
+            var structuralSuffix = "";
+            if (!parts.suffix) structuralSuffix = this.getLineBreakAfterRange(range);
+            range.translateParts = parts;
+            range.textToTranslate = parts.core;
+            range.replaceEnd = range.end + structuralSuffix.length;
+            range.structuralSuffix = structuralSuffix;
+        },
+
         cloneSelectedSet: function(srcSet) {
             var copy = {};
             for (var k in srcSet) {
@@ -1784,7 +1835,11 @@
                 var item = replacements[i];
                 var newStart = item.start + shift;
                 var replacement = String(item.translatedText == null ? "" : item.translatedText);
-                for (var j = 0; j < replacement.length; j++) {
+                var selectedLen = replacement.length;
+                if (item.selectedTextLength !== undefined && item.selectedTextLength !== null) selectedLen = item.selectedTextLength;
+                if (selectedLen < 0) selectedLen = 0;
+                if (selectedLen > replacement.length) selectedLen = replacement.length;
+                for (var j = 0; j < selectedLen; j++) {
                     selectedIndices.push(newStart + j);
                     selectedSet[newStart + j] = true;
                 }
@@ -1979,9 +2034,13 @@
                 return; }
                 var ranges = this.collectSelectedRanges();
                 if (ranges.length === 0) { showToast("请先选择文字"); return; }
+                var translatableCount = 0;
                 for (var ri = 0; ri < ranges.length; ri++) {
-                    if (ranges[ri].text.length > 5000) { showToast("单段文本过长，最多支持5000字符"); return; }
+                    this.prepareRangeForTranslate(ranges[ri]);
+                    if (ranges[ri].textToTranslate.length > 5000) { showToast("单段文本过长，最多支持5000字符"); return; }
+                    if (ranges[ri].textToTranslate.length > 0) translatableCount++;
                 }
+                if (translatableCount === 0) { showToast("请先选择文字"); return; }
                 
                 if (isTranslating) { showToast("正在翻译中，请稍候...");
                 return; }
@@ -1994,13 +2053,21 @@
                     run: function() {
                         try {
                             var replacements = [];
+                            var translatedCount = 0;
                             for (var i = 0; i < ranges.length; i++) {
-                                if (i > 0) java.lang.Thread.sleep(1200);
-                                var translatedText = self.translateTextSyncWithRetry(ranges[i].text);
+                                var translatedText = ranges[i].text;
+                                if (ranges[i].textToTranslate.length > 0) {
+                                    if (translatedCount > 0) java.lang.Thread.sleep(1200);
+                                    translatedText = self.translateTextSyncWithRetry(ranges[i].textToTranslate);
+                                    translatedText = self.buildTranslatedRangeText(ranges[i].translateParts, translatedText);
+                                    translatedCount++;
+                                }
+                                translatedText = String(translatedText == null ? "" : translatedText) + String(ranges[i].structuralSuffix || "");
                                 replacements.push({
                                     start: ranges[i].start,
-                                    end: ranges[i].end,
-                                    translatedText: translatedText
+                                    end: ranges[i].replaceEnd,
+                                    translatedText: translatedText,
+                                    selectedTextLength: translatedText.length - String(ranges[i].structuralSuffix || "").length
                                 });
                             }
                             self.replaceSelectedRanges(replacements);
